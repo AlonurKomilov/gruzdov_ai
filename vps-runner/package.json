@@ -1,0 +1,16 @@
+{
+  "name": "p2c-catcher-vps",
+  "version": "1.0.0",
+  "description": "Headless P2C order catcher with Telegram bot control",
+  "main": "launcher.js",
+  "scripts": {
+    "start": "node launcher.js",
+    "login": "node login.js",
+    "bot": "node bot.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "dotenv": "^16.4.0"
+  }
+}

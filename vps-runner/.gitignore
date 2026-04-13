@@ -1,0 +1,4 @@
+chrome-data/
+screenshots/
+node_modules/
+.env

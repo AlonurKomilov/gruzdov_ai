@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚡ P2C Catcher</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #0d0d1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+    padding: 16px;
+  }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    background: rgba(40,40,60,0.9);
+    border-radius: 12px;
+    margin-bottom: 16px;
+    border: 1px solid #333;
+  }
+  .header h1 { font-size: 20px; color: #8b5cf6; }
+  .header .connection {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: #888;
+  }
+  .header .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #ef4444; display: inline-block;
+  }
+  .header .dot.on { background: #22c55e; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 768px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: rgba(20,20,35,0.95);
+    border: 1px solid #2a2a3a;
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .card h2 {
+    font-size: 14px;
+    color: #aaa;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Status card */
+  .status-badge {
+    display: inline-block;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 15px;
+    margin-bottom: 10px;
+  }
+  .status-badge.active { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); }
+  .status-badge.inactive { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+  .status-badge.paused { background: rgba(234,179,8,0.15); color: #facc15; border: 1px solid rgba(234,179,8,0.3); }
+  .status-badge.limit { background: rgba(139,92,246,0.15); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3); }
+
+  .status-text { font-size: 13px; color: #888; margin-bottom: 8px; }
+
+  .progress-wrap {
+    background: rgba(255,255,255,0.05);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  .progress-bar {
+    height: 8px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 6px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #8b5cf6, #6d28d9);
+    border-radius: 4px;
+    transition: width 0.3s;
+  }
+
+  /* Buttons */
+  .btn-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    flex: 1;
+    min-width: 100px;
+    padding: 12px 16px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: #fff;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn:active { transform: scale(0.97); }
+  .btn.green { background: #22c55e; }
+  .btn.red { background: #ef4444; }
+  .btn.blue { background: #3b82f6; }
+  .btn.purple { background: #8b5cf6; }
+  .btn.orange { background: #f59e0b; }
+  .btn.gray { background: #4b5563; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Form controls */
+  .form-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .form-row label { font-size: 13px; color: #999; }
+  .form-row input[type="number"],
+  .form-row input[type="text"] {
+    width: 80px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid #555;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+    text-align: center;
+    outline: none;
+  }
+  .form-row input:focus { border-color: #8b5cf6; }
+  .form-row select {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid #555;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+    outline: none;
+  }
+  .form-row select:focus { border-color: #8b5cf6; }
+
+  .switch {
+    position: relative; width: 44px; height: 24px;
+    display: inline-block;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: #444; border-radius: 24px; cursor: pointer;
+    transition: 0.2s;
+  }
+  .switch .slider::before {
+    content: ''; position: absolute; width: 18px; height: 18px;
+    left: 3px; bottom: 3px; background: #fff; border-radius: 50%;
+    transition: 0.2s;
+  }
+  .switch input:checked + .slider { background: #8b5cf6; }
+  .switch input:checked + .slider::before { transform: translateX(20px); }
+
+  /* Screenshot */
+  .screenshot-wrap {
+    background: rgba(0,0,0,0.3);
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+    min-height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .screenshot-wrap img {
+    width: 100%;
+    display: block;
+    border-radius: 8px;
+  }
+  .screenshot-wrap .placeholder {
+    color: #555; font-size: 14px;
+  }
+  .screenshot-time {
+    font-size: 11px; color: #666; text-align: right; margin-top: 4px;
+  }
+
+  /* Orders log */
+  .order-item {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .order-item .time { color: #888; font-size: 12px; }
+  .order-item .amount { color: #4ade80; font-weight: 600; }
+  .order-item .delay { color: #facc15; font-size: 12px; }
+  .order-item .recipient { color: #8b5cf6; font-size: 12px; }
+
+  .no-orders { color: #555; text-align: center; padding: 20px; }
+
+  /* Log area */
+  .log {
+    background: rgba(0,0,0,0.3);
+    border-radius: 8px;
+    padding: 10px;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    color: #888;
+  }
+  .log .entry { margin-bottom: 2px; }
+  .log .entry.success { color: #4ade80; }
+  .log .entry.error { color: #f87171; }
+  .log .entry.info { color: #60a5fa; }
+
+  .full-width { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>⚡ P2C Catcher</h1>
+  <div class="connection">
+    <span class="dot" id="connDot"></span>
+    <span id="connText">Connecting...</span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- STATUS CARD -->
+  <div class="card">
+    <h2>📊 Status</h2>
+    <div id="statusBadge" class="status-badge inactive">🔴 NOT ACTIVE</div>
+    <div id="statusText" class="status-text">—</div>
+    <div class="progress-wrap">
+      <span id="caught">0</span> / <span id="target">1</span> orders
+      <div class="progress-bar"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn green" id="btnStart" onclick="doCmd('start')">▶ START</button>
+      <button class="btn red" id="btnStop" onclick="doCmd('stop')">⏹ STOP</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn blue" id="btnCont" onclick="doCmd('continue')">⏭ CONTINUE</button>
+      <button class="btn gray" onclick="doCmd('start'); addLog('Counter reset', 'info');">🔄 RESET</button>
+    </div>
+  </div>
+
+  <!-- SETTINGS CARD -->
+  <div class="card">
+    <h2>⚙️ Settings</h2>
+    <div class="form-row">
+      <label>Order limit:</label>
+      <input type="number" id="cfgLimit" min="1" max="999" value="1">
+    </div>
+    <div class="form-row">
+      <label>Delay min (ms):</label>
+      <input type="number" id="cfgDelayMin" min="0" max="5000" value="0">
+    </div>
+    <div class="form-row">
+      <label>Delay max (ms):</label>
+      <input type="number" id="cfgDelayMax" min="0" max="5000" value="0">
+    </div>
+    <div class="form-row">
+      <label>Pause after catch:</label>
+      <label class="switch">
+        <input type="checkbox" id="cfgPause" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="btn-row">
+      <button class="btn purple" onclick="saveConfig()">💾 SAVE</button>
+    </div>
+  </div>
+
+  <!-- FILTERS CARD -->
+  <div class="card">
+    <h2>🔍 P2C Filters</h2>
+    <div class="form-row">
+      <label>Payment method:</label>
+      <input type="text" id="cfgMethod" value="Озон" style="width:120px; text-align:left;">
+    </div>
+    <div class="form-row">
+      <label>Sum min (RUB):</label>
+      <input type="number" id="cfgSumMin" min="0" value="10">
+    </div>
+    <div class="form-row">
+      <label>Sum max (RUB):</label>
+      <input type="number" id="cfgSumMax" min="0" value="400">
+    </div>
+    <div class="btn-row">
+      <button class="btn orange" onclick="applyFilters()">🔍 APPLY FILTERS</button>
+    </div>
+  </div>
+
+  <!-- SCREENSHOT CARD -->
+  <div class="card">
+    <h2>📸 Live View</h2>
+    <div class="screenshot-wrap" id="screenWrap">
+      <span class="placeholder">Click to load screenshot</span>
+    </div>
+    <div class="screenshot-time" id="screenTime"></div>
+    <div class="btn-row" style="margin-top:8px;">
+      <button class="btn gray" onclick="loadScreenshot()">📸 REFRESH</button>
+      <button class="btn gray" onclick="toggleAutoScreen();" id="btnAutoScreen">🔄 AUTO: OFF</button>
+    </div>
+  </div>
+
+  <!-- ORDERS LOG -->
+  <div class="card full-width">
+    <h2>📋 Caught Orders</h2>
+    <div id="orderList">
+      <div class="no-orders">No orders yet</div>
+    </div>
+  </div>
+
+  <!-- SYSTEM LOG -->
+  <div class="card full-width">
+    <h2>📝 Log</h2>
+    <div class="log" id="logArea"></div>
+  </div>
+
+</div>
+
+<script>
+  // =====================================================
+  // Dashboard Client JS
+  // =====================================================
+
+  let autoScreenInterval = null;
+  let pollInterval = null;
+  let lastEventJson = '';
+
+  // --- API calls ---
+  async function api(path, opts) {
+    try {
+      const res = await fetch(path, opts);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res;
+    } catch (e) {
+      addLog('API error: ' + e.message, 'error');
+      throw e;
+    }
+  }
+
+  async function doCmd(cmd, args) {
+    addLog(`Command: ${cmd}`, 'info');
+    try {
+      const res = await api('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd, args })
+      });
+      const data = await res.json();
+      addLog(`Result: ${JSON.stringify(data.result)}`, 'success');
+      setTimeout(pollStatus, 300);
+    } catch (e) {}
+  }
+
+  async function saveConfig() {
+    const cfg = {
+      orderLimit: parseInt(el('cfgLimit').value) || 1,
+      minDelay: parseInt(el('cfgDelayMin').value) || 0,
+      maxDelay: parseInt(el('cfgDelayMax').value) || 0,
+      pauseAfterCatch: el('cfgPause').checked,
+    };
+    try {
+      await api('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      });
+      addLog('Config saved', 'success');
+    } catch (e) {}
+  }
+
+  async function applyFilters() {
+    const filters = {
+      paymentMethod: el('cfgMethod').value,
+      sumMin: el('cfgSumMin').value,
+      sumMax: el('cfgSumMax').value,
+    };
+    addLog('Applying filters...', 'info');
+    try {
+      const res = await api('/api/filters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(filters)
+      });
+      const data = await res.json();
+      addLog('Filters: ' + data.result, 'success');
+      setTimeout(loadScreenshot, 1500); // show result
+    } catch (e) {}
+  }
+
+  async function loadScreenshot() {
+    try {
+      const res = await api('/api/screenshot');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      el('screenWrap').innerHTML = `<img src="${url}" alt="Screenshot">`;
+      el('screenTime').textContent = new Date().toLocaleTimeString();
+    } catch (e) {
+      el('screenWrap').innerHTML = '<span class="placeholder">Screenshot failed</span>';
+    }
+  }
+
+  function toggleAutoScreen() {
+    if (autoScreenInterval) {
+      clearInterval(autoScreenInterval);
+      autoScreenInterval = null;
+      el('btnAutoScreen').textContent = '🔄 AUTO: OFF';
+    } else {
+      loadScreenshot();
+      autoScreenInterval = setInterval(loadScreenshot, 5000);
+      el('btnAutoScreen').textContent = '🔄 AUTO: ON';
+    }
+  }
+
+  // --- Status polling ---
+  async function pollStatus() {
+    try {
+      const res = await api('/api/status');
+      const data = await res.json();
+      const s = data.status;
+      const cfg = data.config;
+
+      // Connection indicator
+      el('connDot').className = 'dot on';
+      el('connText').textContent = 'Connected';
+
+      if (!s || s.error) {
+        el('connDot').className = 'dot';
+        el('connText').textContent = 'Error: ' + (s?.error || 'unknown');
+        return;
+      }
+
+      // Status badge
+      const badge = el('statusBadge');
+      if (s.limitReached) {
+        badge.className = 'status-badge limit';
+        badge.textContent = `⛔ LIMIT — ${s.caught}/${s.limit}`;
+      } else if (s.waitingApproval) {
+        badge.className = 'status-badge paused';
+        badge.textContent = '⏸ PAUSED';
+      } else if (s.enabled) {
+        badge.className = 'status-badge active';
+        badge.textContent = '🟢 CATCHING';
+      } else {
+        badge.className = 'status-badge inactive';
+        badge.textContent = '🔴 NOT ACTIVE';
+      }
+
+      el('statusText').textContent = s.status || '—';
+      el('caught').textContent = s.caught || 0;
+      el('target').textContent = s.limit || 1;
+      const pct = s.limit > 0 ? Math.min(100, (s.caught / s.limit) * 100) : 0;
+      el('progressFill').style.width = pct + '%';
+
+      // Update config fields from server
+      if (cfg) {
+        el('cfgLimit').value = cfg.orderLimit || 1;
+        el('cfgDelayMin').value = cfg.minDelay ?? 0;
+        el('cfgDelayMax').value = cfg.maxDelay ?? 0;
+        el('cfgPause').checked = cfg.pauseAfterCatch !== false;
+        if (cfg.paymentMethod) el('cfgMethod').value = cfg.paymentMethod;
+        if (cfg.sumMin) el('cfgSumMin').value = cfg.sumMin;
+        if (cfg.sumMax) el('cfgSumMax').value = cfg.sumMax;
+      }
+
+      // Orders
+      if (s.orders && s.orders.length > 0) {
+        el('orderList').innerHTML = s.orders.map(o => `
+          <div class="order-item">
+            <span class="time">${esc(o.time || '?')}</span>
+            ${o.rub ? ` — <span class="amount">${esc(o.rub)} ₽</span>` : ''}
+            ${o.usdt ? ` / <span class="amount">${esc(o.usdt)} USDT</span>` : ''}
+            ${o.catchDelay != null ? ` <span class="delay">(${o.catchDelay}ms)</span>` : ''}
+            ${o.recipient ? `<br><span class="recipient">→ ${esc(o.recipient)}</span>` : ''}
+            ${o.reward ? ` <span style="color:#4ade80;">+${esc(o.reward)} USDT</span>` : ''}
+          </div>
+        `).join('');
+      }
+
+      // Event notifications
+      if (s.lastEvent) {
+        const ej = JSON.stringify(s.lastEvent);
+        if (ej !== lastEventJson) {
+          lastEventJson = ej;
+          const ev = s.lastEvent;
+          if (ev.type === 'caught') addLog(`✅ Order #${ev.num} caught (${ev.delay}ms) — ${ev.rub||'?'}₽`, 'success');
+          else if (ev.type === 'limit') addLog(`⛔ Limit reached: ${ev.caught}/${ev.limit}`, 'error');
+          else if (ev.type === 'paused') addLog(`⏸ Paused after order #${ev.num}`, 'info');
+          else if (ev.type === 'error') addLog(`❌ ${ev.message}`, 'error');
+          else if (ev.type === 'started') addLog('🟢 Catcher started', 'success');
+          else if (ev.type === 'stopped') addLog('🔴 Catcher stopped', 'info');
+        }
+      }
+
+    } catch (e) {
+      el('connDot').className = 'dot';
+      el('connText').textContent = 'Disconnected';
+    }
+  }
+
+  // --- Helpers ---
+  function el(id) { return document.getElementById(id); }
+
+  function esc(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  function addLog(msg, type) {
+    const log = el('logArea');
+    const entry = document.createElement('div');
+    entry.className = 'entry ' + (type || '');
+    entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+    // Keep last 100 entries
+    while (log.children.length > 100) log.removeChild(log.firstChild);
+  }
+
+  // --- Init ---
+  addLog('Dashboard loaded', 'info');
+  pollStatus();
+  pollInterval = setInterval(pollStatus, 2000);
+</script>
+</body>
+</html>
