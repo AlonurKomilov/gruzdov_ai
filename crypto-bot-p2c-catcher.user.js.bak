@@ -1,0 +1,861 @@
+// ==UserScript==
+// @name         Crypto Bot P2C Order Catcher
+// @namespace    crypto-bot-p2c-catcher
+// @version      1.3
+// @description  Auto-detect and quickly catch P2C merchant orders in Crypto Bot (Telegram Web)
+// @match        https://web.telegram.org/*
+// @match        https://*.telegram.org/*
+// @match        https://app.send.tg/*
+// @match        https://*.send.tg/*
+// @match        https://*.crypt.bot/*
+// @match        https://crypt.bot/*
+// @match        https://app.crypt.bot/*
+// @match        https://pay.crypt.bot/*
+// @match        https://*.cryptobot.app/*
+// @match        https://t.me/*
+// @grant        GM_addStyle
+// @grant        GM_notification
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  console.log('[P2C Catcher] Script loaded on:', window.location.href);
+
+  // ========================== CONFIGURATION ==========================
+  const CONFIG = {
+    // Master enable/disable
+    enabled: true,
+    // Auto-click "Оплатить" button when order appears
+    autoClick: true,
+    // Random delay range (ms) before clicking — anti-ban measure
+    // Lower = faster catch, but higher ban risk
+    minDelay: 100,
+    maxDelay: 400,
+    // Cooldown after catching an order (ms) before looking for next
+    cooldownAfterCatch: 2000,
+    // Pause after each catch and wait for user approval
+    pauseAfterCatch: true,
+    // Max orders per session (0 = unlimited)
+    maxOrdersPerSession: 0,
+    // Max orders per hour (0 = unlimited)
+    maxOrdersPerHour: 30,
+    // Sound alert on catch
+    soundEnabled: true,
+    // Sound frequency (Hz) and duration (ms)
+    soundFreq: 880,
+    soundDuration: 150,
+    // DOM scan interval (ms) — fallback if MutationObserver misses
+    fallbackScanInterval: 300,
+    // Hotkey to toggle enable/disable (Ctrl + Shift + key)
+    toggleKey: 'Q',
+    // Known pay button texts (Russian)
+    payButtonTexts: ['Оплатить'],
+    // Keywords that indicate an order card
+    orderKeywords: ['USDT', '₽', 'RUB'],
+  };
+
+  // ========================== STATE ==========================
+  let state = {
+    enabled: CONFIG.enabled,
+    autoClick: CONFIG.autoClick,
+    totalCaught: 0,
+    sessionCaught: 0,
+    hourCaught: 0,
+    hourResetTime: Date.now() + 3600000,
+    lastCatchTime: 0,
+    inCooldown: false,
+    waitingApproval: false,
+    pendingOrder: null,
+    orders: [],
+    lastStatus: 'Инициализация...',
+    observerActive: false,
+  };
+
+  // ========================== SOUND ==========================
+  function playBeep() {
+    if (!CONFIG.soundEnabled) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = CONFIG.soundFreq;
+      osc.type = 'sine';
+      gain.gain.value = 0.3;
+      osc.start();
+      osc.stop(ctx.currentTime + CONFIG.soundDuration / 1000);
+    } catch (e) {
+      // Audio context may be blocked
+    }
+  }
+
+  // ========================== UTILS ==========================
+  function randomDelay(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function timestamp() {
+    return new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // ========================== ORDER EXTRACTION ==========================
+  function extractOrderInfo(orderElement) {
+    if (!orderElement) return null;
+    const text = orderElement.textContent || '';
+
+    const info = {
+      time: timestamp(),
+      raw: text.substring(0, 200),
+      rub: null,
+      usdt: null,
+      recipient: null,
+      reward: null,
+      pricePerUsdt: null,
+    };
+
+    // Extract RUB amount (e.g., "80 ₽" or "105 ₽")
+    const rubMatch = text.match(/([\d.,]+)\s*[₽P]/);
+    if (rubMatch) info.rub = rubMatch[1];
+
+    // Extract USDT amount (e.g., "1.034608 USDT")
+    const usdtMatch = text.match(/([\d.,]+)\s*USDT/);
+    if (usdtMatch) info.usdt = usdtMatch[1];
+
+    // Extract recipient (Получатель: ...)
+    const recipientMatch = text.match(/Получатель\s*([\w_]+)/);
+    if (recipientMatch) info.recipient = recipientMatch[1];
+
+    // Extract reward (Вознаграждение: +0.051118 USDT)
+    const rewardMatch = text.match(/Вознаграждение\s*\+?([\d.,]+)\s*USDT/);
+    if (rewardMatch) info.reward = rewardMatch[1];
+
+    // Extract price per USDT
+    const priceMatch = text.match(/Цена за 1 USDT\s*([\d.,]+)/);
+    if (priceMatch) info.pricePerUsdt = priceMatch[1];
+
+    return info;
+  }
+
+  // ========================== RATE LIMITING ==========================
+  function checkRateLimits() {
+    // Reset hourly counter
+    if (Date.now() > state.hourResetTime) {
+      state.hourCaught = 0;
+      state.hourResetTime = Date.now() + 3600000;
+    }
+
+    // Check session limit
+    if (CONFIG.maxOrdersPerSession > 0 && state.sessionCaught >= CONFIG.maxOrdersPerSession) {
+      state.lastStatus = '⚠️ Лимит сессии достигнут';
+      return false;
+    }
+
+    // Check hourly limit
+    if (CONFIG.maxOrdersPerHour > 0 && state.hourCaught >= CONFIG.maxOrdersPerHour) {
+      state.lastStatus = '⚠️ Часовой лимит достигнут';
+      return false;
+    }
+
+    // Check cooldown
+    if (state.inCooldown) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // ========================== PAY BUTTON DETECTION ==========================
+  function findPayButtons(root) {
+    const buttons = [];
+    const allElements = (root || document).querySelectorAll(
+      'button, [role="button"], a, div[class*="btn"], div[class*="button"], span[class*="btn"]'
+    );
+
+    for (const el of allElements) {
+      const text = (el.textContent || '').trim();
+      for (const btnText of CONFIG.payButtonTexts) {
+        if (text === btnText || text.includes(btnText)) {
+          // Make sure it's visible and clickable
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            const style = window.getComputedStyle(el);
+            if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+              buttons.push(el);
+            }
+          }
+        }
+      }
+    }
+
+    return buttons;
+  }
+
+  // Search within iframes too
+  function findPayButtonsDeep() {
+    let buttons = findPayButtons(document);
+
+    // Try to access iframes (same-origin only)
+    try {
+      const iframes = document.querySelectorAll('iframe');
+      for (const iframe of iframes) {
+        try {
+          const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+          if (iframeDoc) {
+            buttons = buttons.concat(findPayButtons(iframeDoc));
+          }
+        } catch (e) {
+          // Cross-origin — cannot access
+        }
+      }
+    } catch (e) {
+      // Ignore iframe access errors
+    }
+
+    return buttons;
+  }
+
+  // ========================== ORDER CARD DETECTION ==========================
+  function getOrderCardFromButton(button) {
+    // Walk up the DOM to find the order card container
+    let el = button;
+    for (let i = 0; i < 10; i++) {
+      el = el.parentElement;
+      if (!el) break;
+      const text = el.textContent || '';
+      // Check if this parent contains order-like information
+      if (CONFIG.orderKeywords.some(kw => text.includes(kw))) {
+        return el;
+      }
+    }
+    // Fallback: return the button's direct parent
+    return button.parentElement || button;
+  }
+
+  // ========================== CLICK HANDLER ==========================
+  function clickPayButton(button) {
+    if (!state.enabled || !state.autoClick) return;
+    if (!checkRateLimits()) return;
+
+    const orderCard = getOrderCardFromButton(button);
+    const orderInfo = extractOrderInfo(orderCard);
+
+    state.inCooldown = true;
+    const delay = randomDelay(CONFIG.minDelay, CONFIG.maxDelay);
+
+    state.lastStatus = `⏳ Захват через ${delay}мс...`;
+    updatePanel();
+
+    setTimeout(() => {
+      try {
+        // Simulate human-like click
+        button.focus();
+
+        const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+        for (const evtName of events) {
+          const evt = new MouseEvent(evtName, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          });
+          button.dispatchEvent(evt);
+        }
+
+        state.sessionCaught++;
+        state.hourCaught++;
+        state.totalCaught++;
+        state.lastCatchTime = Date.now();
+
+        if (orderInfo) {
+          orderInfo.catchDelay = delay;
+          state.orders.unshift(orderInfo);
+          // Keep only last 50 orders in memory
+          if (state.orders.length > 50) state.orders.pop();
+        }
+
+        state.lastStatus = `✅ Заказ пойман! (${delay}мс)`;
+        playBeep();
+
+        // Pause and wait for user approval
+        if (CONFIG.pauseAfterCatch) {
+          state.waitingApproval = true;
+          state.pendingOrder = orderInfo;
+          state.lastStatus = '⏸️ ПАУЗА — Подтвердите для продолжения';
+          updatePanel();
+          return;
+        }
+
+        updatePanel();
+
+        // Cooldown
+        setTimeout(() => {
+          state.inCooldown = false;
+          state.lastStatus = '👀 Ожидание заказов...';
+          updatePanel();
+        }, CONFIG.cooldownAfterCatch);
+      } catch (e) {
+        state.inCooldown = false;
+        state.lastStatus = '❌ Ошибка клика: ' + e.message;
+        updatePanel();
+      }
+    }, delay);
+  }
+
+  // ========================== SCANNING ==========================
+  let lastFoundButtonCount = 0;
+  const clickedButtons = new WeakSet();
+
+  function scanForOrders() {
+    if (!state.enabled || !state.autoClick || state.waitingApproval) {
+      return;
+    }
+
+    const buttons = findPayButtonsDeep();
+
+    if (buttons.length > 0 && buttons.length !== lastFoundButtonCount) {
+      for (const btn of buttons) {
+        if (!clickedButtons.has(btn)) {
+          clickedButtons.add(btn);
+          clickPayButton(btn);
+          break; // Only click one at a time
+        }
+      }
+    }
+
+    lastFoundButtonCount = buttons.length;
+  }
+
+  // ========================== MUTATION OBSERVER ==========================
+  function setupObserver(root) {
+    const observer = new MutationObserver((mutations) => {
+      if (!state.enabled || !state.autoClick || state.inCooldown || state.waitingApproval) return;
+
+      let hasNewContent = false;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length > 0) {
+          hasNewContent = true;
+          break;
+        }
+      }
+
+      if (hasNewContent) {
+        // Small delay to let React/Vue finish rendering
+        setTimeout(scanForOrders, 50);
+      }
+    });
+
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+    });
+
+    state.observerActive = true;
+    return observer;
+  }
+
+  // Also observe iframes as they appear
+  function watchForIframes() {
+    const iframeObserver = new MutationObserver(() => {
+      const iframes = document.querySelectorAll('iframe');
+      for (const iframe of iframes) {
+        try {
+          const doc = iframe.contentDocument || iframe.contentWindow?.document;
+          if (doc && !iframe._p2cObserved) {
+            iframe._p2cObserved = true;
+            setupObserver(doc.body || doc.documentElement);
+          }
+        } catch (e) {
+          // Cross-origin
+        }
+      }
+    });
+
+    iframeObserver.observe(document.body || document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  // ========================== UI PANEL ==========================
+  let panelEl = null;
+
+  function createPanel() {
+    const panel = document.createElement('div');
+    panel.id = 'p2c-catcher-panel';
+    panel.innerHTML = `
+      <style>
+        #p2c-catcher-panel {
+          position: fixed;
+          top: 10px;
+          right: 10px;
+          width: 320px;
+          max-height: 500px;
+          background: rgba(20, 20, 30, 0.95);
+          color: #e0e0e0;
+          border: 1px solid #444;
+          border-radius: 12px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          font-size: 13px;
+          z-index: 2147483647;
+          box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+          overflow: hidden;
+          transition: opacity 0.2s;
+          user-select: none;
+        }
+        #p2c-catcher-panel.minimized .p2c-body {
+          display: none;
+        }
+        .p2c-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 10px 14px;
+          background: rgba(40, 40, 60, 0.9);
+          border-bottom: 1px solid #333;
+          cursor: move;
+        }
+        .p2c-header-title {
+          font-weight: 600;
+          font-size: 14px;
+          color: #8b5cf6;
+        }
+        .p2c-header-btns {
+          display: flex;
+          gap: 6px;
+        }
+        .p2c-header-btns button {
+          background: rgba(255,255,255,0.1);
+          border: none;
+          color: #ccc;
+          width: 26px;
+          height: 26px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-size: 14px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background 0.2s;
+        }
+        .p2c-header-btns button:hover {
+          background: rgba(255,255,255,0.2);
+        }
+        .p2c-body {
+          padding: 12px 14px;
+          max-height: 400px;
+          overflow-y: auto;
+        }
+        .p2c-status {
+          padding: 8px 12px;
+          border-radius: 8px;
+          margin-bottom: 10px;
+          font-weight: 500;
+          text-align: center;
+        }
+        .p2c-status.active {
+          background: rgba(34, 197, 94, 0.15);
+          color: #4ade80;
+          border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+        .p2c-status.paused {
+          background: rgba(234, 179, 8, 0.15);
+          color: #facc15;
+          border: 1px solid rgba(234, 179, 8, 0.3);
+        }
+        .p2c-status.off {
+          background: rgba(239, 68, 68, 0.15);
+          color: #f87171;
+          border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        .p2c-stats {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+          margin-bottom: 12px;
+        }
+        .p2c-stat {
+          background: rgba(255,255,255,0.05);
+          padding: 8px 10px;
+          border-radius: 8px;
+          text-align: center;
+        }
+        .p2c-stat-value {
+          font-size: 20px;
+          font-weight: 700;
+          color: #8b5cf6;
+        }
+        .p2c-stat-label {
+          font-size: 11px;
+          color: #888;
+          margin-top: 2px;
+        }
+        .p2c-controls {
+          display: flex;
+          gap: 6px;
+          margin-bottom: 12px;
+        }
+        .p2c-controls button {
+          flex: 1;
+          padding: 8px;
+          border-radius: 8px;
+          border: none;
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .p2c-btn-enable {
+          background: #22c55e;
+          color: #fff;
+        }
+        .p2c-btn-enable.off {
+          background: #ef4444;
+        }
+        .p2c-btn-enable:hover {
+          opacity: 0.8;
+        }
+        .p2c-btn-auto {
+          background: #8b5cf6;
+          color: #fff;
+        }
+        .p2c-btn-auto.off {
+          background: #555;
+        }
+        .p2c-btn-auto:hover {
+          opacity: 0.8;
+        }
+        .p2c-orders-title {
+          font-weight: 600;
+          margin-bottom: 6px;
+          color: #aaa;
+          font-size: 12px;
+        }
+        .p2c-order-item {
+          background: rgba(255,255,255,0.04);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 8px;
+          padding: 8px 10px;
+          margin-bottom: 6px;
+          font-size: 12px;
+        }
+        .p2c-order-item .time {
+          color: #888;
+          font-size: 11px;
+        }
+        .p2c-order-item .amount {
+          color: #4ade80;
+          font-weight: 600;
+        }
+        .p2c-order-item .delay {
+          color: #facc15;
+          font-size: 11px;
+        }
+        .p2c-order-item .recipient {
+          color: #8b5cf6;
+          font-size: 11px;
+        }
+        .p2c-status-text {
+          text-align: center;
+          margin-bottom: 8px;
+          font-size: 12px;
+          color: #888;
+        }
+        .p2c-hint {
+          font-size: 11px;
+          color: #555;
+          text-align: center;
+          padding-top: 6px;
+          border-top: 1px solid #333;
+        }
+        .p2c-btn-approve {
+          background: #22c55e;
+          color: #fff;
+          font-weight: 700;
+          width: 100%;
+          padding: 12px;
+          border: none;
+          border-radius: 8px;
+          cursor: pointer;
+          font-size: 14px;
+          margin-bottom: 8px;
+          transition: all 0.2s;
+          display: none;
+          animation: p2c-pulse 1.5s infinite;
+        }
+        .p2c-btn-approve:hover {
+          background: #16a34a;
+        }
+        .p2c-btn-approve.visible {
+          display: block;
+        }
+        @keyframes p2c-pulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+          50% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+        }
+        .p2c-pending-order {
+          background: rgba(34, 197, 94, 0.1);
+          border: 1px solid rgba(34, 197, 94, 0.3);
+          border-radius: 8px;
+          padding: 10px;
+          margin-bottom: 8px;
+          font-size: 12px;
+          display: none;
+        }
+        .p2c-pending-order.visible {
+          display: block;
+        }
+        .p2c-pending-order .label {
+          color: #888;
+          font-size: 11px;
+        }
+        .p2c-pending-order .value {
+          color: #4ade80;
+          font-weight: 600;
+        }
+      </style>
+      <div class="p2c-header">
+        <span class="p2c-header-title">⚡ P2C Catcher</span>
+        <div class="p2c-header-btns">
+          <button id="p2c-minimize" title="Свернуть">−</button>
+          <button id="p2c-close" title="Скрыть (${CONFIG.toggleKey} вернёт)">×</button>
+        </div>
+      </div>
+      <div class="p2c-body">
+        <div id="p2c-status" class="p2c-status active"></div>
+        <div id="p2c-status-text" class="p2c-status-text"></div>
+        <div class="p2c-stats">
+          <div class="p2c-stat">
+            <div id="p2c-session-count" class="p2c-stat-value">0</div>
+            <div class="p2c-stat-label">За сессию</div>
+          </div>
+          <div class="p2c-stat">
+            <div id="p2c-hour-count" class="p2c-stat-value">0</div>
+            <div class="p2c-stat-label">За час</div>
+          </div>
+        </div>
+        <div class="p2c-controls">
+          <button id="p2c-toggle-enable" class="p2c-btn-enable">✅ ВКЛ</button>
+          <button id="p2c-toggle-auto" class="p2c-btn-auto">🤖 АВТО</button>
+        </div>
+        <div id="p2c-pending-info" class="p2c-pending-order"></div>
+        <button id="p2c-approve-btn" class="p2c-btn-approve">▶️ ПРОДОЛЖИТЬ — Ловить следующий</button>
+        <div id="p2c-orders-section">
+          <div class="p2c-orders-title">Последние заказы:</div>
+          <div id="p2c-orders-list"></div>
+        </div>
+        <div class="p2c-hint">Ctrl+Shift+${CONFIG.toggleKey} — вкл/выкл</div>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    panelEl = panel;
+
+    // Dragging
+    makeDraggable(panel, panel.querySelector('.p2c-header'));
+
+    // Minimize
+    panel.querySelector('#p2c-minimize').addEventListener('click', () => {
+      panel.classList.toggle('minimized');
+    });
+
+    // Close (hide)
+    panel.querySelector('#p2c-close').addEventListener('click', () => {
+      panel.style.display = 'none';
+    });
+
+    // Toggle enable
+    panel.querySelector('#p2c-toggle-enable').addEventListener('click', () => {
+      state.enabled = !state.enabled;
+      updatePanel();
+    });
+
+    // Toggle auto-click
+    panel.querySelector('#p2c-toggle-auto').addEventListener('click', () => {
+      state.autoClick = !state.autoClick;
+      updatePanel();
+    });
+
+    // Approve button — resume after catching an order
+    panel.querySelector('#p2c-approve-btn').addEventListener('click', () => {
+      approveAndContinue();
+    });
+
+    updatePanel();
+    return panel;
+  }
+
+  // ========================== APPROVAL ==========================
+  function approveAndContinue() {
+    state.waitingApproval = false;
+    state.pendingOrder = null;
+    state.inCooldown = false;
+    state.lastStatus = '👀 Ожидание заказов...';
+    updatePanel();
+    playBeep();
+  }
+
+  function updatePanel() {
+    if (!panelEl) return;
+
+    // Status
+    const statusEl = panelEl.querySelector('#p2c-status');
+    const statusTextEl = panelEl.querySelector('#p2c-status-text');
+    if (state.waitingApproval) {
+      statusEl.className = 'p2c-status paused';
+      statusEl.textContent = '⏸️ ПАУЗА — Ожидание подтверждения';
+    } else if (state.enabled && state.autoClick) {
+      statusEl.className = 'p2c-status active';
+      statusEl.textContent = '🟢 АКТИВЕН — Авто-захват';
+    } else if (state.enabled) {
+      statusEl.className = 'p2c-status paused';
+      statusEl.textContent = '🟡 МОНИТОРИНГ — без авто';
+    } else {
+      statusEl.className = 'p2c-status off';
+      statusEl.textContent = '🔴 ВЫКЛЮЧЕН';
+    }
+
+    // Show/hide approve button and pending order info
+    const approveBtn = panelEl.querySelector('#p2c-approve-btn');
+    const pendingInfo = panelEl.querySelector('#p2c-pending-info');
+    if (state.waitingApproval) {
+      approveBtn.classList.add('visible');
+      if (state.pendingOrder) {
+        pendingInfo.classList.add('visible');
+        const o = state.pendingOrder;
+        pendingInfo.innerHTML = `
+          <div style="text-align:center;margin-bottom:6px;font-weight:700;color:#facc15;">⏸️ Пойманный заказ:</div>
+          ${o.rub ? `<div><span class="label">Сумма:</span> <span class="value">${escapeHtml(o.rub)} ₽</span></div>` : ''}
+          ${o.usdt ? `<div><span class="label">USDT:</span> <span class="value">${escapeHtml(o.usdt)} USDT</span></div>` : ''}
+          ${o.recipient ? `<div><span class="label">Получатель:</span> <span class="value">${escapeHtml(o.recipient)}</span></div>` : ''}
+          ${o.reward ? `<div><span class="label">Награда:</span> <span class="value">+${escapeHtml(o.reward)} USDT</span></div>` : ''}
+        `;
+      }
+    } else {
+      approveBtn.classList.remove('visible');
+      pendingInfo.classList.remove('visible');
+    }
+    statusTextEl.textContent = state.lastStatus;
+
+    // Stats
+    panelEl.querySelector('#p2c-session-count').textContent = state.sessionCaught;
+    panelEl.querySelector('#p2c-hour-count').textContent = state.hourCaught;
+
+    // Enable button
+    const enableBtn = panelEl.querySelector('#p2c-toggle-enable');
+    enableBtn.textContent = state.enabled ? '✅ ВКЛ' : '❌ ВЫКЛ';
+    enableBtn.className = 'p2c-btn-enable' + (state.enabled ? '' : ' off');
+
+    // Auto button
+    const autoBtn = panelEl.querySelector('#p2c-toggle-auto');
+    autoBtn.textContent = state.autoClick ? '🤖 АВТО' : '👁 РУЧНОЙ';
+    autoBtn.className = 'p2c-btn-auto' + (state.autoClick ? '' : ' off');
+
+    // Orders list
+    const listEl = panelEl.querySelector('#p2c-orders-list');
+    if (state.orders.length === 0) {
+      listEl.innerHTML = '<div style="color:#555;text-align:center;padding:8px;">Пока нет заказов</div>';
+    } else {
+      listEl.innerHTML = state.orders.slice(0, 10).map(order => `
+        <div class="p2c-order-item">
+          <span class="time">${escapeHtml(order.time)}</span>
+          ${order.rub ? ` — <span class="amount">${escapeHtml(order.rub)} ₽</span>` : ''}
+          ${order.usdt ? ` / <span class="amount">${escapeHtml(order.usdt)} USDT</span>` : ''}
+          ${order.catchDelay ? ` <span class="delay">(${order.catchDelay}мс)</span>` : ''}
+          ${order.recipient ? `<br><span class="recipient">→ ${escapeHtml(order.recipient)}</span>` : ''}
+          ${order.reward ? ` <span style="color:#4ade80;">+${escapeHtml(order.reward)} USDT</span>` : ''}
+        </div>
+      `).join('');
+    }
+  }
+
+  // ========================== DRAGGING ==========================
+  function makeDraggable(element, handle) {
+    let isDragging = false;
+    let offsetX, offsetY;
+
+    handle.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      const rect = element.getBoundingClientRect();
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const x = Math.max(0, Math.min(window.innerWidth - 100, e.clientX - offsetX));
+      const y = Math.max(0, Math.min(window.innerHeight - 50, e.clientY - offsetY));
+      element.style.left = x + 'px';
+      element.style.top = y + 'px';
+      element.style.right = 'auto';
+    });
+
+    document.addEventListener('mouseup', () => {
+      isDragging = false;
+    });
+  }
+
+  // ========================== KEYBOARD SHORTCUT ==========================
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key.toUpperCase() === CONFIG.toggleKey) {
+      e.preventDefault();
+      state.enabled = !state.enabled;
+      if (panelEl) {
+        panelEl.style.display = '';
+      }
+      updatePanel();
+    }
+  });
+
+  // ========================== INITIALIZATION ==========================
+  function init() {
+    // Only init if we have a DOM body
+    if (!document.body) {
+      setTimeout(init, 200);
+      return;
+    }
+
+    console.log('[P2C Catcher] Initializing on', window.location.href);
+
+    // Create UI panel
+    createPanel();
+
+    // Setup MutationObserver on main document
+    setupObserver(document.body);
+
+    // Watch for iframes (main Telegram page loads mini apps in iframes)
+    watchForIframes();
+
+    // Fallback periodic scan
+    setInterval(() => {
+      if (state.enabled && state.autoClick && !state.inCooldown && !state.waitingApproval) {
+        scanForOrders();
+      }
+    }, CONFIG.fallbackScanInterval);
+
+    // Update panel every second
+    setInterval(updatePanel, 1000);
+
+    state.lastStatus = '👀 Ожидание заказов...';
+    updatePanel();
+
+    console.log('[P2C Catcher] Ready! Ctrl+Shift+' + CONFIG.toggleKey + ' to toggle');
+  }
+
+  // Start
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
